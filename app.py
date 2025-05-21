@@ -1,8 +1,7 @@
-from flask import Flask, request, send_file, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import yt_dlp
 import os
-import uuid
 
 app = Flask(__name__)
 CORS(app)
@@ -11,89 +10,79 @@ DOWNLOAD_FOLDER = "downloads"
 if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
 
-@app.route("/progress", methods=["GET"])
-def get_progress():
-    return jsonify(progress_data)
+# Shared progress tracker
+progress_data = {
+    "progress": 0,
+    "downloaded": 0,
+    "total": 1,
+    "eta": 0
+}
 
+# Progress hook function
+def progress_hook(d):
+    if d['status'] == 'downloading':
+        progress_data['progress'] = float(d.get('progress', 0))
+        progress_data['downloaded'] = d.get('downloaded_bytes', 0)
+        progress_data['total'] = d.get('total_bytes', 1)
+        progress_data['eta'] = d.get('eta', 0)
 
 @app.route("/download", methods=["POST"])
 def download_video():
     data = request.get_json()
     url = data.get("url")
-    media_type = data.get("type", "both")
+    type_ = data.get("type", "both")
     quality = data.get("quality", "high")
 
     if not url:
         return jsonify({"error": "No URL provided"}), 400
 
-    # Generate unique filename
-    filename_base = str(uuid.uuid4())
-    output_path = os.path.join(DOWNLOAD_FOLDER, f"{filename_base}.%(ext)s")
-
-    # Format mapping
-    format_map = {
-        "high": "bestvideo[height>=1080]+bestaudio/best[height>=1080]",
-        "medium": "bestvideo[height<=720]+bestaudio/best[height<=720]",
-        "low": "bestvideo[height<=360]+bestaudio/best[height<=360]",
+    # Format mapping based on quality
+    quality_map = {
+        "high": "bestvideo[height>=1080]+bestaudio/best",
+        "medium": "bestvideo[height<=720]+bestaudio/best",
+        "low": "bestvideo[height<=360]+bestaudio/best"
     }
 
-    # Media type logic
-    postprocessors = []
-    if media_type == "audio":
-        postprocessors.append({
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        })
-        format_code = "bestaudio"
-    elif media_type == "video":
-        format_code = format_map.get(quality, "bestvideo+bestaudio/best")
-    else:  # both
-        format_code = format_map.get(quality, "bestvideo+bestaudio/best")
-        postprocessors.append({
-            'key': 'FFmpegVideoConvertor',
-            'preferedformat': 'mp4'
-        })
-
-    progress_data = {}
-
-    def progress_hook(d):
-        if d['status'] == 'downloading':
-            progress_data['downloaded'] = d.get('downloaded_bytes', 0)
-            progress_data['total'] = d.get('total_bytes') or d.get('total_bytes_estimate', 1)
-            progress_data['speed'] = d.get('speed', 0)
-            progress_data['eta'] = d.get('eta', 0)
-            progress_data['progress'] = round((progress_data['downloaded'] / progress_data['total']) * 100, 2)
-
-
+    # Base options
     ydl_opts = {
-        "outtmpl": output_path,
-        "format": format_code,
+        "outtmpl": os.path.join(DOWNLOAD_FOLDER, "%(title)s.%(ext)s"),
         "cookiefile": "cookies.txt",
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
-        "merge_output_format": "mp4",
-         "progress_hooks": [progress_hook],
-        "postprocessors": postprocessors,
+        "progress_hooks": [progress_hook]
     }
+
+    if type_ == "audio":
+        ydl_opts["format"] = "bestaudio/best"
+        ydl_opts["postprocessors"] = [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192"
+        }]
+    elif type_ == "video":
+        ydl_opts["format"] = quality_map.get(quality, "bestvideo+bestaudio")
+        ydl_opts["merge_output_format"] = "mp4"
+    else:  # both = video+audio
+        ydl_opts["format"] = quality_map.get(quality, "bestvideo+bestaudio")
+        ydl_opts["merge_output_format"] = "mp4"
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            # Get correct final file path
-            downloaded_file = ydl.prepare_filename(info)
-            if media_type == "audio":
-                downloaded_file = downloaded_file.rsplit(".", 1)[0] + ".mp3"
-            else:
-                downloaded_file = downloaded_file.rsplit(".", 1)[0] + ".mp4"
-            
-            if not os.path.exists(downloaded_file):
-                return jsonify({"error": "File not downloaded properly"}), 500
-
-            return send_file(downloaded_file, as_attachment=True)
+            filename = ydl.prepare_filename(info)
+            # Some processors change ext (like .webm -> .mp3)
+            if type_ == "audio":
+                filename = os.path.splitext(filename)[0] + ".mp3"
+            elif type_ == "video":
+                filename = os.path.splitext(filename)[0] + ".mp4"
+            return send_file(filename, as_attachment=True)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/progress", methods=["GET"])
+def get_progress():
+    return jsonify(progress_data)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
