@@ -11,6 +11,11 @@ DOWNLOAD_FOLDER = "downloads"
 if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
 
+@app.route("/progress", methods=["GET"])
+def get_progress():
+    return jsonify(progress_data)
+
+
 @app.route("/download", methods=["POST"])
 def download_video():
     data = request.get_json()
@@ -50,6 +55,17 @@ def download_video():
             'preferedformat': 'mp4'
         })
 
+    progress_data = {}
+
+    def progress_hook(d):
+        if d['status'] == 'downloading':
+            progress_data['downloaded'] = d.get('downloaded_bytes', 0)
+            progress_data['total'] = d.get('total_bytes') or d.get('total_bytes_estimate', 1)
+            progress_data['speed'] = d.get('speed', 0)
+            progress_data['eta'] = d.get('eta', 0)
+            progress_data['progress'] = round((progress_data['downloaded'] / progress_data['total']) * 100, 2)
+
+
     ydl_opts = {
         "outtmpl": output_path,
         "format": format_code,
@@ -58,6 +74,7 @@ def download_video():
         "quiet": True,
         "no_warnings": True,
         "merge_output_format": "mp4",
+         "progress_hooks": [progress_hook],
         "postprocessors": postprocessors,
     }
 
